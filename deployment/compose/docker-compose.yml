@@ -1,0 +1,387 @@
+#
+#  Copyright (c) 2024 Contributors to the Eclipse Foundation
+#
+#  See the NOTICE file(s) distributed with this work for additional
+#  information regarding copyright ownership.
+#
+#  This program and the accompanying materials are made available under the
+#  terms of the Apache License, Version 2.0 which is available at
+#  https://www.apache.org/licenses/LICENSE-2.0
+#
+#  SPDX-License-Identifier: Apache-2.0
+#
+# ---------------------------------------------------------------------------
+# MVD — Docker Compose deployment
+#
+# Service names are kept identical to the Kubernetes service names so that
+# the same did:web DIDs, DSP callback addresses and STS token URLs work
+# without any changes to credentials or participants list files.
+#
+# Prerequisites (run from the repo root):
+#   ./gradlew build
+#   ./gradlew -Ppersistence=true dockerize
+#
+# Quickstart:
+#   cd deployment/compose
+#   docker compose up -d
+#   # wait ~60 s for all JVMs to start, then:
+#   ./seed-compose.sh
+# ---------------------------------------------------------------------------
+
+networks:
+  mvd-net:
+    driver: bridge
+
+volumes:
+  consumer-postgres-data:
+  provider-postgres-data:
+  issuer-postgres-data:
+
+services:
+
+  # ===========================================================================
+  # DATASPACE ISSUER (nginx)
+  # Serves the issuer DID document at did:web:dataspace-issuer
+  # The service MUST be named "dataspace-issuer" so the hostname resolves.
+  # ===========================================================================
+  dataspace-issuer:
+    image: nginx:alpine
+    volumes:
+      - ../assets/issuer/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ../assets/issuer/did.k8s.json:/var/www/.well-known/did.json:ro
+    ports:
+      - "9876:80"      # optional: test with curl http://localhost:9876/.well-known/did.json
+    networks:
+      - mvd-net
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /var/www/.well-known/did.json"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ===========================================================================
+  # CONSUMER CORP
+  # ===========================================================================
+
+  consumer-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - consumer-postgres-data:/var/lib/postgresql/data
+      - ./init-sql/consumer-init.sql:/docker-entrypoint-initdb.d/01-consumer-init.sql:ro
+    ports:
+      - "5432:5432"
+    networks:
+      - mvd-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  consumer-vault:
+    image: hashicorp/vault:1.17
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: root
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+      VAULT_ADDR: "http://0.0.0.0:8200"
+    cap_add:
+      - IPC_LOCK
+    command: vault server -dev -dev-root-token-id=root -dev-listen-address=0.0.0.0:8200
+    ports:
+      - "18200:8200"   # host-mapped for inspection; internal services use http://consumer-vault:8200
+    networks:
+      - mvd-net
+    healthcheck:
+      test: ["CMD-SHELL", "vault status -address=http://127.0.0.1:8200 > /dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Service name MUST be "consumer-identityhub" — encodes did:web:consumer-identityhub%3A7083:consumer
+  consumer-identityhub:
+    image: identity-hub:latest
+    depends_on:
+      consumer-postgres:
+        condition: service_healthy
+      consumer-vault:
+        condition: service_healthy
+    env_file:
+      - ./env/consumer-identityhub.env
+    volumes:
+      - ../assets/credentials/k8s/consumer/dataprocessor-credential.json:/etc/credentials/dataprocessor-credential.json:ro
+      - ../assets/credentials/k8s/consumer/membership-credential.json:/etc/credentials/membership-credential.json:ro
+    ports:
+      - "7081:7081"    # identity API  ← seed-compose.sh uses localhost:7081
+      - "7082:7082"    # credentials API
+      - "7083:7083"    # DID resolution
+      - "7084:7084"    # STS token endpoint
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:7080/api/check/liveness >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks:
+      - mvd-net
+    restart: on-failure
+
+  # Service name MUST be "consumer-controlplane" — used in EDC_DSP_CALLBACK_ADDRESS
+  consumer-controlplane:
+    image: controlplane:latest
+    depends_on:
+      consumer-postgres:
+        condition: service_healthy
+      consumer-vault:
+        condition: service_healthy
+      consumer-identityhub:
+        condition: service_started
+    env_file:
+      - ./env/consumer-controlplane.env
+    volumes:
+      - ../assets/participants/participants.k8s.json:/etc/participants/participants.json:ro
+    ports:
+      - "8080:8080"    # web / health
+      - "8081:8081"    # management API  ← Postman uses localhost:8081
+      - "8082:8082"    # DSP / protocol
+      - "8083:8083"    # control
+      - "8084:8084"    # catalog
+    networks:
+      - mvd-net
+    restart: on-failure
+
+  # Service name MUST be "consumer-dataplane" — used as EDC_HOSTNAME
+  consumer-dataplane:
+    image: dataplane:latest
+    depends_on:
+      consumer-controlplane:
+        condition: service_started
+      consumer-vault:
+        condition: service_healthy
+    env_file:
+      - ./env/consumer-dataplane.env
+    ports:
+      - "11002:11002"  # public API (data transfer)
+    networks:
+      - mvd-net
+    restart: on-failure
+
+  # ===========================================================================
+  # PROVIDER CORP
+  # ===========================================================================
+
+  provider-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - provider-postgres-data:/var/lib/postgresql/data
+      - ./init-sql/provider-init.sql:/docker-entrypoint-initdb.d/01-provider-init.sql:ro
+    ports:
+      - "5433:5432"
+    networks:
+      - mvd-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  provider-vault:
+    image: hashicorp/vault:1.17
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: root
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+      VAULT_ADDR: "http://0.0.0.0:8200"
+    cap_add:
+      - IPC_LOCK
+    command: vault server -dev -dev-root-token-id=root -dev-listen-address=0.0.0.0:8200
+    ports:
+      - "18201:8200"
+    networks:
+      - mvd-net
+    healthcheck:
+      test: ["CMD-SHELL", "vault status -address=http://127.0.0.1:8200 > /dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Service name MUST be "provider-identityhub" — encodes did:web:provider-identityhub%3A7083:provider
+  provider-identityhub:
+    image: identity-hub:latest
+    depends_on:
+      provider-postgres:
+        condition: service_healthy
+      provider-vault:
+        condition: service_healthy
+    env_file:
+      - ./env/provider-identityhub.env
+    volumes:
+      - ../assets/credentials/k8s/provider/dataprocessor-credential.json:/etc/credentials/dataprocessor-credential.json:ro
+      - ../assets/credentials/k8s/provider/membership-credential.json:/etc/credentials/membership-credential.json:ro
+    ports:
+      - "7090:7080"    # web / health (host offset +10)
+      - "7091:7081"    # identity API  ← seed-compose.sh uses localhost:7091
+      - "7092:7082"    # credentials API
+      - "7093:7083"    # DID resolution
+      - "7094:7084"    # STS token endpoint
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:7080/api/check/liveness >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks:
+      - mvd-net
+    restart: on-failure
+
+  # Catalog Server — single pod (no separate dataplane, mirrors K8s deployment).
+  # Service name MUST be "provider-catalog-server-controlplane" — used in seed and DSP callbacks.
+  provider-catalog-server-controlplane:
+    image: catalog-server:latest
+    depends_on:
+      provider-postgres:
+        condition: service_healthy
+      provider-vault:
+        condition: service_healthy
+      provider-identityhub:
+        condition: service_started
+    env_file:
+      - ./env/provider-catalog-server.env
+    volumes:
+      - ../assets/participants/participants.k8s.json:/etc/participants/participants.json:ro
+    ports:
+      - "8090:8080"    # web / health (host offset +10)
+      - "8091:8081"    # management API  ← seed-compose.sh uses localhost:8091
+      - "8092:8082"    # DSP / protocol
+      - "8093:8083"    # control
+    networks:
+      - mvd-net
+    restart: on-failure
+
+  # Service name MUST be "provider-qna-controlplane" — used in EDC_DSP_CALLBACK_ADDRESS
+  provider-qna-controlplane:
+    image: controlplane:latest
+    depends_on:
+      provider-postgres:
+        condition: service_healthy
+      provider-vault:
+        condition: service_healthy
+      provider-identityhub:
+        condition: service_started
+    env_file:
+      - ./env/provider-qna-controlplane.env
+    volumes:
+      - ../assets/participants/participants.k8s.json:/etc/participants/participants.json:ro
+    ports:
+      - "8190:8080"    # web / health
+      - "8191:8081"    # management API  ← seed-compose.sh uses localhost:8191
+      - "8192:8082"    # DSP / protocol
+      - "8193:8083"    # control
+      - "8194:8084"    # catalog
+    networks:
+      - mvd-net
+    restart: on-failure
+
+  # Service name MUST be "provider-qna-dataplane" — used as EDC_HOSTNAME
+  provider-qna-dataplane:
+    image: dataplane:latest
+    depends_on:
+      provider-qna-controlplane:
+        condition: service_started
+      provider-vault:
+        condition: service_healthy
+    env_file:
+      - ./env/provider-qna-dataplane.env
+    ports:
+      - "12001:11002"  # public API (data transfer)
+    networks:
+      - mvd-net
+    restart: on-failure
+
+  # Service name MUST be "provider-manufacturing-controlplane" — used in EDC_DSP_CALLBACK_ADDRESS
+  provider-manufacturing-controlplane:
+    image: controlplane:latest
+    depends_on:
+      provider-postgres:
+        condition: service_healthy
+      provider-vault:
+        condition: service_healthy
+      provider-identityhub:
+        condition: service_started
+    env_file:
+      - ./env/provider-manufacturing-controlplane.env
+    volumes:
+      - ../assets/participants/participants.k8s.json:/etc/participants/participants.json:ro
+    ports:
+      - "8290:8080"    # web / health
+      - "8291:8081"    # management API  ← seed-compose.sh uses localhost:8291
+      - "8292:8082"    # DSP / protocol
+      - "8293:8083"    # control
+      - "8294:8084"    # catalog
+    networks:
+      - mvd-net
+    restart: on-failure
+
+  # Service name MUST be "provider-manufacturing-dataplane" — used as EDC_HOSTNAME
+  provider-manufacturing-dataplane:
+    image: dataplane:latest
+    depends_on:
+      provider-manufacturing-controlplane:
+        condition: service_started
+      provider-vault:
+        condition: service_healthy
+    env_file:
+      - ./env/provider-manufacturing-dataplane.env
+    ports:
+      - "12002:11002"  # public API (data transfer)
+    networks:
+      - mvd-net
+    restart: on-failure
+
+  # ===========================================================================
+  # DATASPACE ISSUER SERVICE
+  # Service name MUST be "dataspace-issuer-service"
+  # → encodes did:web:dataspace-issuer-service%3A10016:issuer
+  # ===========================================================================
+
+  issuer-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - issuer-postgres-data:/var/lib/postgresql/data
+      - ./init-sql/issuer-init.sql:/docker-entrypoint-initdb.d/01-issuer-init.sql:ro
+    ports:
+      - "5434:5432"
+    networks:
+      - mvd-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  dataspace-issuer-service:
+    image: issuerservice:latest
+    depends_on:
+      issuer-postgres:
+        condition: service_healthy
+      consumer-vault:
+        condition: service_healthy   # issuer service shares consumer vault (mirrors K8s issuer.tf)
+    env_file:
+      - ./env/issuerservice.env
+    ports:
+      - "10010:10010"  # web / health
+      - "10011:10011"  # STS
+      - "10012:10012"  # issuance
+      - "10013:10013"  # admin API  ← seed-compose.sh uses localhost:10013
+      - "10015:10015"  # identity API  ← seed-compose.sh uses localhost:10015
+      - "10016:10016"  # DID
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:10010/api/check/liveness >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks:
+      - mvd-net
+    restart: on-failure
