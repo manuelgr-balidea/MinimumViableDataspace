@@ -33,7 +33,8 @@ PARTICIPANT_CONTEXT_B64="${PARTICIPANT_CONTEXT_B64:-ZGlkOndlYjpjb25zdW1lci1pZGVu
 ISSUER_DID="${ISSUER_DID:-did:web:dataspace-issuer-service%3A10016:issuer}"
 
 ASSET_ID="${ASSET_ID:-asset-membership-demo-1}"
-POLICY_ID="${POLICY_ID:-require-membership-demo}"
+ACCESS_POLICY_ID="${ACCESS_POLICY_ID:-${POLICY_ID:-require-membership-demo}}"
+CONTRACT_POLICY_ID="${CONTRACT_POLICY_ID:-${POLICY_ID_CONTRACT:-require-dataprocessor-demo}}"
 DEF_ID="${DEF_ID:-membership-demo-def}"
 
 CREDENTIAL_TYPE="${CREDENTIAL_TYPE:-FoobarCredential}"
@@ -71,7 +72,7 @@ post_json_accept_conflict() {
 }
 
 echo
-echo "==> [1/3] Creating demo asset/policy/contract definition"
+echo "==> [1/3] Creating demo asset/policies/contract definition"
 
 post_json_accept_conflict \
   "$CP_QNA/api/management/v3/assets" \
@@ -82,13 +83,19 @@ post_json_accept_conflict \
 post_json_accept_conflict \
   "$CP_QNA/api/management/v3/policydefinitions" \
   "$API_KEY_CP" \
-  "{\"@context\":[\"https://w3id.org/edc/connector/management/v0.0.1\"],\"@type\":\"PolicyDefinition\",\"@id\":\"$POLICY_ID\",\"policy\":{\"@type\":\"Set\",\"permission\":[{\"action\":\"use\",\"constraint\":{\"leftOperand\":\"MembershipCredential\",\"operator\":\"eq\",\"rightOperand\":\"active\"}}]}}" \
-  "Create policy '$POLICY_ID'"
+  "{\"@context\":[\"https://w3id.org/edc/connector/management/v0.0.1\"],\"@type\":\"PolicyDefinition\",\"@id\":\"$ACCESS_POLICY_ID\",\"policy\":{\"@type\":\"Set\",\"permission\":[{\"action\":\"use\",\"constraint\":{\"leftOperand\":\"MembershipCredential\",\"operator\":\"eq\",\"rightOperand\":\"active\"}}]}}" \
+  "Create access policy '$ACCESS_POLICY_ID'"
+
+post_json_accept_conflict \
+  "$CP_QNA/api/management/v3/policydefinitions" \
+  "$API_KEY_CP" \
+  "{\"@context\":[\"https://w3id.org/edc/connector/management/v0.0.1\"],\"@type\":\"PolicyDefinition\",\"@id\":\"$CONTRACT_POLICY_ID\",\"policy\":{\"@type\":\"Set\",\"obligation\":[{\"action\":\"use\",\"constraint\":{\"leftOperand\":\"DataAccess.level\",\"operator\":\"eq\",\"rightOperand\":\"processing\"}}]}}" \
+  "Create contract policy '$CONTRACT_POLICY_ID'"
 
 post_json_accept_conflict \
   "$CP_QNA/api/management/v3/contractdefinitions" \
   "$API_KEY_CP" \
-  "{\"@context\":[\"https://w3id.org/edc/connector/management/v0.0.1\"],\"@id\":\"$DEF_ID\",\"@type\":\"ContractDefinition\",\"accessPolicyId\":\"$POLICY_ID\",\"contractPolicyId\":\"$POLICY_ID\",\"assetsSelector\":{\"@type\":\"Criterion\",\"operandLeft\":\"https://w3id.org/edc/v0.0.1/ns/id\",\"operator\":\"=\",\"operandRight\":\"$ASSET_ID\"}}" \
+  "{\"@context\":[\"https://w3id.org/edc/connector/management/v0.0.1\"],\"@id\":\"$DEF_ID\",\"@type\":\"ContractDefinition\",\"accessPolicyId\":\"$ACCESS_POLICY_ID\",\"contractPolicyId\":\"$CONTRACT_POLICY_ID\",\"assetsSelector\":{\"@type\":\"Criterion\",\"operandLeft\":\"https://w3id.org/edc/v0.0.1/ns/id\",\"operator\":\"=\",\"operandRight\":\"$ASSET_ID\"}}" \
   "Create contract definition '$DEF_ID'"
 
 echo

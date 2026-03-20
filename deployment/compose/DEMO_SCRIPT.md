@@ -78,11 +78,11 @@ cd ../..
 ### Acción 1: listar assets del provider QnA
 
 ```bash
-curl -s -X POST "$CP_QNA/api/management/v3/assets/request" \
-  -H "Content-Type: application/json" \
-  -H "x-api-key: $API_KEY_CP" \
-  -d '{"@context":{"@vocab":"https://w3id.org/edc/v0.0.1/ns/"},"@type":"QuerySpec"}' \
-  | jq -r '.[]."@id"'
+  curl -s -X POST "$CP_QNA/api/management/v3/assets/request" \
+    -H "Content-Type: application/json" \
+    -H "x-api-key: $API_KEY_CP" \
+    -d '{"@context":{"@vocab":"https://w3id.org/edc/v0.0.1/ns/"},"@type":"QuerySpec"}' \
+    | jq -r '.[]."@id"'
 ```
 
 ### Acción 2: listar assets del provider Manufacturing
@@ -136,12 +136,11 @@ curl -s -X POST "$CATALOG_QUERY/api/catalog/v1alpha/catalog/query" \
       | objects
       | .["dcat:dataset"]?
       | if type=="array" then .[] else . end
-      | "asset=" + (.[ "@id" ] // "") + " | policy=" + (.["odrl:hasPolicy"]["@id"] // "")
+      | .["@id"] // empty
     '
 ```
 
 ```bash
-curl -s -X POST "$CATALOG_QUERY/api/catalog/v1alpha/catalog/query" \
 curl -s -X POST "$CATALOG_QUERY/api/catalog/v1alpha/catalog/query" \
   -H "Content-Type: application/json" \
   -H "x-api-key: $API_KEY_CP" \
@@ -204,6 +203,8 @@ newman run deployment/postman/MVD.postman_collection.json \
 - “Aquí se ve el ciclo completo: `catalog -> negotiation -> transfer -> EDR -> download`.”
 - “La transferencia final se valida con descarga HTTP del dataplane (`/api/public`).”
 
+Si quieres explicar la negociacion en detalle (solo esa fase, con Curl): [README_DSP_NEGOTIATION.md](./README_DSP_NEGOTIATION.md)
+
 ### Resultado esperado
 
 - Todas las requests del folder `ControlPlane Management` en verde.
@@ -259,12 +260,15 @@ curl -s -H "Host: $DID_PROVIDER_HOST" "$DID_PROVIDER/provider/did.json" | jq '{i
 
 ## Bloque G (opcional) — Demo adicional: nuevo asset + policy + emisión VC (8–10 min)
 
+Para ejecucion manual didactica (flujo completo + modo 5 minutos en un solo documento), consulta: [README_DSP_ADVANCED.md](./README_DSP_ADVANCED.md)
+
 Este bloque añade una historia completa de negocio adicional, independiente del `seed`:
 
 1. Crear un asset nuevo en provider QnA.
-2. Crear una policy nueva (basada en `MembershipCredential`).
-3. Vincular asset+policy en un `ContractDefinition` nuevo.
-4. Solicitar una VC al Issuer Service y verla en el IdentityHub del consumer.
+2. Crear policy de acceso (`MembershipCredential`).
+3. Crear policy contractual (`DataAccess.level=processing`).
+4. Vincular asset+policies en un `ContractDefinition` nuevo.
+5. Solicitar una VC al Issuer Service y verla en el IdentityHub del consumer.
 
 > Nota sobre “consumer EU”: en este runtime, el operando `DataAccess.region` no está registrado por defecto en policy-engine.  
 > Para demo, se representa “EU” en el claim `membershipType` de la VC emitida (`FoobarCredential`).
@@ -285,14 +289,16 @@ Opcionalmente puedes sobreescribir IDs para no reutilizar los mismos en varias d
 
 ```bash
 ASSET_ID="asset-membership-demo-2" \
-POLICY_ID="require-membership-demo-2" \
+ACCESS_POLICY_ID="require-membership-demo-2" \
+CONTRACT_POLICY_ID="require-dataprocessor-demo-2" \
 DEF_ID="membership-demo-def-2" \
 ./deployment/compose/demo-advanced.sh
 ```
 
 ```bash
 ASSET_ID="asset-membership-demo-2" \
-POLICY_ID="require-membership-demo-2" \
+ACCESS_POLICY_ID="require-membership-demo-2" \
+CONTRACT_POLICY_ID="require-dataprocessor-demo-2" \
 DEF_ID="membership-demo-def-2" \
 ./deployment/compose/demo-advanced-clean.sh
 ```
@@ -301,7 +307,8 @@ DEF_ID="membership-demo-def-2" \
 
 ```bash
 export ASSET_ID="asset-membership-demo-1"
-export POLICY_ID="require-membership-demo"
+export ACCESS_POLICY_ID="require-membership-demo"
+export CONTRACT_POLICY_ID="require-dataprocessor-demo"
 export DEF_ID="membership-demo-def"
 ```
 
@@ -331,7 +338,7 @@ curl -s -X POST "$CP_QNA/api/management/v3/policydefinitions" \
   -d '{
     "@context": ["https://w3id.org/edc/connector/management/v0.0.1"],
     "@type": "PolicyDefinition",
-    "@id": "'"$POLICY_ID"'",
+    "@id": "'"$ACCESS_POLICY_ID"'",
     "policy": {
       "@type": "Set",
       "permission": [
@@ -349,6 +356,30 @@ curl -s -X POST "$CP_QNA/api/management/v3/policydefinitions" \
 ```
 
 ```bash
+curl -s -X POST "$CP_QNA/api/management/v3/policydefinitions" \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: $API_KEY_CP" \
+  -d '{
+    "@context": ["https://w3id.org/edc/connector/management/v0.0.1"],
+    "@type": "PolicyDefinition",
+    "@id": "'"$CONTRACT_POLICY_ID"'",
+    "policy": {
+      "@type": "Set",
+      "obligation": [
+        {
+          "action": "use",
+          "constraint": {
+            "leftOperand": "DataAccess.level",
+            "operator": "eq",
+            "rightOperand": "processing"
+          }
+        }
+      ]
+    }
+  }' | jq .
+```
+
+```bash
 curl -s -X POST "$CP_QNA/api/management/v3/contractdefinitions" \
   -H "Content-Type: application/json" \
   -H "x-api-key: $API_KEY_CP" \
@@ -356,8 +387,8 @@ curl -s -X POST "$CP_QNA/api/management/v3/contractdefinitions" \
     "@context": ["https://w3id.org/edc/connector/management/v0.0.1"],
     "@id": "'"$DEF_ID"'",
     "@type": "ContractDefinition",
-    "accessPolicyId": "'"$POLICY_ID"'",
-    "contractPolicyId": "'"$POLICY_ID"'",
+    "accessPolicyId": "'"$ACCESS_POLICY_ID"'",
+    "contractPolicyId": "'"$CONTRACT_POLICY_ID"'",
     "assetsSelector": {
       "@type": "Criterion",
       "operandLeft": "https://w3id.org/edc/v0.0.1/ns/id",
@@ -420,7 +451,7 @@ curl -s "$IH_CONSUMER/api/identity/v1alpha/participants/$PARTICIPANT_CONTEXT_B64
 
 ### Resultado esperado
 
-- `asset-membership-demo-1`, `require-membership-demo`, `membership-demo-def` creados.
+- `asset-membership-demo-1`, `require-membership-demo`, `require-dataprocessor-demo`, `membership-demo-def` creados.
 - El `request status` pasa por `CREATED/REQUESTED` y llega a `ISSUED`.
 - Se visualiza una `FoobarCredential` en el consumer IdentityHub.
 

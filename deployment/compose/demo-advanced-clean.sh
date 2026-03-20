@@ -33,7 +33,8 @@ PARTICIPANT_CONTEXT_B64="${PARTICIPANT_CONTEXT_B64:-ZGlkOndlYjpjb25zdW1lci1pZGVu
 ISSUER_DID="${ISSUER_DID:-did:web:dataspace-issuer-service%3A10016:issuer}"
 
 ASSET_ID="${ASSET_ID:-asset-membership-demo-1}"
-POLICY_ID="${POLICY_ID:-require-membership-demo}"
+ACCESS_POLICY_ID="${ACCESS_POLICY_ID:-${POLICY_ID:-require-membership-demo}}"
+CONTRACT_POLICY_ID="${CONTRACT_POLICY_ID:-${POLICY_ID_CONTRACT:-require-dataprocessor-demo}}"
 DEF_ID="${DEF_ID:-membership-demo-def}"
 
 CREDENTIAL_TYPE="${CREDENTIAL_TYPE:-FoobarCredential}"
@@ -87,7 +88,8 @@ API_KEY_IH="$API_KEY_IH" \
 PARTICIPANT_CONTEXT_B64="$PARTICIPANT_CONTEXT_B64" \
 ISSUER_DID="$ISSUER_DID" \
 ASSET_ID="$ASSET_ID" \
-POLICY_ID="$POLICY_ID" \
+ACCESS_POLICY_ID="$ACCESS_POLICY_ID" \
+CONTRACT_POLICY_ID="$CONTRACT_POLICY_ID" \
 DEF_ID="$DEF_ID" \
 CREDENTIAL_TYPE="$CREDENTIAL_TYPE" \
 CREDENTIAL_DEF_ID="$CREDENTIAL_DEF_ID" \
@@ -111,7 +113,8 @@ else
   echo "==> Cleaning up advanced demo resources"
 
   delete_resource "contractdefinitions/$DEF_ID" "Delete contract definition '$DEF_ID'" || CLEANUP_EXIT=1
-  delete_resource "policydefinitions/$POLICY_ID" "Delete policy '$POLICY_ID'" || CLEANUP_EXIT=1
+  delete_resource "policydefinitions/$CONTRACT_POLICY_ID" "Delete contract policy '$CONTRACT_POLICY_ID'" || CLEANUP_EXIT=1
+  delete_resource "policydefinitions/$ACCESS_POLICY_ID" "Delete access policy '$ACCESS_POLICY_ID'" || CLEANUP_EXIT=1
   delete_resource "assets/$ASSET_ID" "Delete asset '$ASSET_ID'" || CLEANUP_EXIT=1
 fi
 

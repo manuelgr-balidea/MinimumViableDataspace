@@ -291,6 +291,8 @@ Internal service-to-service communication uses Docker DNS (service names).
 
 ## 5. Executing REST requests
 
+If you want a focused, step-by-step explanation of contract negotiation only (catalog -> offer -> contract negotiation -> agreement id), see [`README_DSP_NEGOTIATION.md`](./README_DSP_NEGOTIATION.md).
+
 Use the existing Postman collection at
 [`deployment/postman/MVD.postman_collection.json`](../postman/MVD.postman_collection.json).
 
