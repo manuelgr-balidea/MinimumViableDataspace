@@ -8,13 +8,14 @@ No cambia ni reemplaza los scripts existentes. Solo los traduce a una ejecucion 
 
 Flujo funcional:
 1. Crear un asset nuevo en Provider QnA.
-2. Crear una policy de acceso basada en `MembershipCredential`.
-3. Crear una policy contractual basada en `DataAccess.level=processing`.
-4. Crear un `ContractDefinition` que vincula asset + policies.
+2. Crear las policies de acceso y contrato (`MembershipCredential` y `DataAccess.level=processing`).
+3. Crear un `ContractDefinition` que vincula asset + policies.
+4. Refrescar catalogo y validar que el asset aparece en la cache del consumer.
 5. Solicitar una VC al Issuer Service desde el IdentityHub del consumer.
-6. Esperar a estado `ISSUED`.
+6. Hacer polling hasta estado `ISSUED`.
 7. Verificar la credencial emitida.
-8. Limpiar recursos de demo (opcional).
+8. Negociar y transferir ese mismo asset con `README_DSP_NEGOTIATION.md`.
+9. Limpiar recursos de demo (opcional, al final).
 
 Este flujo es equivalente al comportamiento de:
 - `deployment/compose/demo-advanced.sh`
@@ -39,7 +40,12 @@ Dependencias locales:
 
 ```bash
 export CP_QNA="${CP_QNA:-http://localhost:8191}"
+export CP_CONSUMER="${CP_CONSUMER:-http://localhost:8081}"
 export IH_CONSUMER="${IH_CONSUMER:-http://localhost:7081}"
+export CATALOG_QUERY="${CATALOG_QUERY:-http://localhost:8084}"
+export CATALOG_SERVER_DSP_URL="${CATALOG_SERVER_DSP_URL:-http://provider-catalog-server-controlplane:8082}"
+export PROVIDER_DSP_URL="${PROVIDER_DSP_URL:-http://provider-qna-controlplane:8082}"
+export PROVIDER_ID="${PROVIDER_ID:-did:web:provider-identityhub%3A7083:provider}"
 
 export API_KEY_CP="${API_KEY_CP:-password}"
 export API_KEY_IH="${API_KEY_IH:-c3VwZXItdXNlcg==.c3VwZXItc2VjcmV0LWtleQo=}"
@@ -51,6 +57,13 @@ export ASSET_ID="${ASSET_ID:-asset-membership-demo-1}"
 export ACCESS_POLICY_ID="${ACCESS_POLICY_ID:-require-membership-demo}"
 export CONTRACT_POLICY_ID="${CONTRACT_POLICY_ID:-require-dataprocessor-demo}"
 export DEF_ID="${DEF_ID:-membership-demo-def}"
+
+# Recomendado si repites muchas demos: usar IDs unicos por ejecucion.
+# export DEMO_SUFFIX="$(date +%s)"
+# export ASSET_ID="asset-membership-demo-$DEMO_SUFFIX"
+# export ACCESS_POLICY_ID="require-membership-demo-$DEMO_SUFFIX"
+# export CONTRACT_POLICY_ID="require-dataprocessor-demo-$DEMO_SUFFIX"
+# export DEF_ID="membership-demo-def-$DEMO_SUFFIX"
 
 export CREDENTIAL_TYPE="${CREDENTIAL_TYPE:-FoobarCredential}"
 export CREDENTIAL_DEF_ID="${CREDENTIAL_DEF_ID:-demo-credential-def-2}"
@@ -167,7 +180,35 @@ curl -i -s -X POST "$CP_QNA/api/management/v3/contractdefinitions" \
 
 HTTP esperado: `200`, `201`, `204` o `409`.
 
-## Paso 4. Solicitar credencial verificable
+## Paso 4. Refrescar catalogo y validar que el asset aparece
+
+El catalogo del consumer es una cache. Aunque el asset exista en QnA, primero hay que forzar `catalog/request` y despues consultar cache.
+
+```bash
+curl -s -X POST "$CP_CONSUMER/api/management/v3/catalog/request" \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: $API_KEY_CP" \
+  -d "{
+    \"@context\":[\"https://w3id.org/edc/connector/management/v0.0.1\"],
+    \"@type\":\"CatalogRequest\",
+    \"counterPartyAddress\":\"$PROVIDER_DSP_URL/api/dsp\",
+    \"counterPartyId\":\"$PROVIDER_ID\",
+    \"protocol\":\"dataspace-protocol-http\",
+    \"querySpec\":{\"offset\":0,\"limit\":50}
+  }" >/dev/null
+
+FOUND_IN_CATALOG="$(curl -s -X POST "$CATALOG_QUERY/api/catalog/v1alpha/catalog/query" \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: $API_KEY_CP" \
+  -d '{"@context":["https://w3id.org/edc/connector/management/v0.0.1"],"@type":"QuerySpec"}' \
+  | jq -r --arg A "$ASSET_ID" '[.. | objects | ."@id"? | select(.==$A)] | length')"
+
+echo "FOUND_IN_CATALOG=$FOUND_IN_CATALOG"
+```
+
+Resultado esperado: `FOUND_IN_CATALOG` mayor que `0`.
+
+## Paso 5. Solicitar credencial verificable
 
 La solicitud se envia al IdentityHub del consumer. Se guarda cabecera `Location` para recuperar el `requestId` si el servicio lo devuelve ahi.
 
@@ -205,7 +246,7 @@ rm -f "$REQUEST_HEADERS" "$REQUEST_BODY"
 
 HTTP esperado: `200`, `201` o `204`.
 
-## Paso 5. Polling hasta estado ISSUED
+## Paso 6. Polling hasta estado ISSUED
 
 La emision de credencial es asincrona. Se consulta el estado hasta llegar a `ISSUED`.
 
@@ -232,7 +273,7 @@ for ((i=1; i<=POLL_ATTEMPTS; i++)); do
 done
 ```
 
-## Paso 6. Verificar credencial emitida
+## Paso 7. Verificar credencial emitida
 
 Se consulta el almacenamiento de credenciales del participante para ver el `credentialSubject` emitido.
 
@@ -242,9 +283,21 @@ curl -s "$IH_CONSUMER/api/identity/v1alpha/participants/$PARTICIPANT_CONTEXT_B64
   | jq '.[0].verifiableCredential.credential.credentialSubject[0]'
 ```
 
-## Paso 7. Limpieza opcional
+## Paso 8. Negociar y transferir este mismo asset
 
-Para repetir la demo sin residuos, borra en este orden: contract definition, policy, asset.
+Continua en `README_DSP_NEGOTIATION.md` usando el mismo `ASSET_ID` que acabas de crear aqui.
+
+```bash
+export ASSET_ID="$ASSET_ID"
+export PROVIDER_DSP_URL="$PROVIDER_DSP_URL"
+export PROVIDER_ID="$PROVIDER_ID"
+```
+
+Luego sigue `README_DSP_NEGOTIATION.md` desde el Paso 1 para catalogo + negociacion + transferencia.
+
+## Paso 9. Limpieza opcional
+
+Cuando ya hayas terminado la negociacion y transferencia, puedes limpiar recursos para repetir la demo sin residuos.
 
 ```bash
 curl -i -s -X DELETE "$CP_QNA/api/management/v3/contractdefinitions/$DEF_ID" \
@@ -266,8 +319,8 @@ HTTP esperado para DELETE: `200`, `204` o `404`.
 ## 5. Troubleshooting rapido
 
 Caso: `REQUEST_ID` invalido o vacio.
-- Revisa respuesta del Paso 4.
-- Repite Paso 4 con `REQUEST_ID` nuevo.
+- Revisa respuesta del Paso 5.
+- Repite Paso 5 con `REQUEST_ID` nuevo.
 
 Caso: estado no llega a `ISSUED`.
 - Aumenta espera: `POLL_ATTEMPTS=30`.
@@ -279,12 +332,16 @@ docker compose logs --tail=120 consumer-identityhub dataspace-issuer-service
 ```
 
 Caso: estado `ERROR` en polling.
-- Inspecciona el JSON completo impreso en Paso 5.
+- Inspecciona el JSON completo impreso en Paso 6.
 - Verifica que `issuerDid`, `type` y `id` en la solicitud coincidan con el entorno seed.
 
-Caso: no aparece credencial en Paso 6.
+Caso: no aparece credencial en Paso 7.
 - Confirma `CREDENTIAL_TYPE` correcto.
 - Repite consulta tras unos segundos.
+
+Caso: el asset no aparece en catalogo tras Paso 4.
+- Verifica que el asset exista en provider QnA (`assets/request`).
+- Repite `catalog/request` y espera unos segundos antes de volver a consultar cache.
 
 Caso: la negociacion de este asset se queda en `REQUESTED`.
 - Verifica que este asset se haya creado con `CONTRACT_POLICY_ID=require-dataprocessor-demo`.

@@ -1,6 +1,7 @@
 # Negociacion DSP en MVD Compose (Guia Manual)
 
-Este README esta enfocado solo en explicar la negociacion de contrato entre Consumer y Provider en el MVD con Docker Compose.
+Este README esta enfocado en explicar la negociacion de contrato y la transferencia entre Consumer y Provider en el MVD con Docker Compose.
+Para una prueba completa, se recomienda crear primero el asset en `README_DSP_ADVANCED.md` y despues continuar aqui.
 
 Objetivo:
 - descubrir una oferta en catalogo
@@ -40,6 +41,7 @@ Dependencias locales:
 
 ```bash
 export CP_CONSUMER="${CP_CONSUMER:-http://localhost:8081}"
+export CP_QNA="${CP_QNA:-http://localhost:8191}"
 export CATALOG_QUERY="${CATALOG_QUERY:-http://localhost:8084}"
 export CATALOG_SERVER_DSP_URL="${CATALOG_SERVER_DSP_URL:-http://provider-catalog-server-controlplane:8082}"
 export PROVIDER_DSP_URL="${PROVIDER_DSP_URL:-http://provider-qna-controlplane:8082}"
@@ -47,7 +49,8 @@ export PROVIDER_ID="${PROVIDER_ID:-did:web:provider-identityhub%3A7083:provider}
 export API_KEY_CP="${API_KEY_CP:-password}"
 export PROVIDER_PUBLIC_API="${PROVIDER_PUBLIC_API:-http://localhost:12001}"
 
-export ASSET_ID="${ASSET_ID:-asset-1}"
+# Si vienes de README_DSP_ADVANCED, reutiliza exactamente el mismo ASSET_ID.
+export ASSET_ID="${ASSET_ID:-asset-membership-demo-1}"
 
 export POLL_ATTEMPTS="${POLL_ATTEMPTS:-15}"
 export POLL_INTERVAL_SECONDS="${POLL_INTERVAL_SECONDS:-2}"
@@ -57,21 +60,41 @@ export TRANSFER_POLL_INTERVAL_SECONDS="${TRANSFER_POLL_INTERVAL_SECONDS:-2}"
 
 ## 4. Paso a paso de la negociacion
 
-## Paso 1. Solicitar catalogo federado
+## Paso 0. Verificar que el asset exista en provider QnA
 
-Primero descubrimos ofertas en el catalogo federado.
-
-Este paso consulta directamente el servicio de catálogo federado. Fuerza al Consumer a consultar ofertas via el Catalog Server.
+Antes de negociar, valida que el asset objetivo realmente exista en el provider correcto.
 
 ```bash
-curl -s -X POST "$CATALOG_QUERY/api/catalog/v1alpha/catalog/query" \
+ASSET_PRESENT="$(curl -s -X POST "$CP_QNA/api/management/v3/assets/request" \
   -H "Content-Type: application/json" \
   -H "x-api-key: $API_KEY_CP" \
   -d '{"@context":["https://w3id.org/edc/connector/management/v0.0.1"],"@type":"QuerySpec"}' \
-  | jq 
+  | jq -r --arg A "$ASSET_ID" '[ .[] | select(."@id" == $A) ] | length')"
+
+echo "ASSET_PRESENT=$ASSET_PRESENT"
 ```
 
-Esta consulta pide al conector consumer que haga una solicitud de catálogo DSP a otro conector.
+Resultado esperado: `ASSET_PRESENT=1`.
+
+## Paso 1. Refrescar catalogo federado
+
+Forzamos una solicitud de catalogo DSP para poblar/actualizar cache del consumer.
+
+```bash
+curl -s -X POST "$CP_CONSUMER/api/management/v3/catalog/request" \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: $API_KEY_CP" \
+  -d "{
+    \"@context\":[\"https://w3id.org/edc/connector/management/v0.0.1\"],
+    \"@type\":\"CatalogRequest\",
+    \"counterPartyAddress\":\"$PROVIDER_DSP_URL/api/dsp\",
+    \"counterPartyId\":\"$PROVIDER_ID\",
+    \"protocol\":\"dataspace-protocol-http\",
+    \"querySpec\":{\"offset\":0,\"limit\":50}
+  }" >/dev/null
+```
+
+Opcional: refrescar tambien via Catalog Server (topologia completa de la demo).
 
 ```bash
 curl -s -X POST "$CP_CONSUMER/api/management/v3/catalog/request" \
@@ -84,16 +107,46 @@ curl -s -X POST "$CP_CONSUMER/api/management/v3/catalog/request" \
     \"counterPartyId\":\"$PROVIDER_ID\",
     \"protocol\":\"dataspace-protocol-http\",
     \"querySpec\":{\"offset\":0,\"limit\":50}
-  }" | jq .
+  }" >/dev/null
 ```
 
-Tomamos el policy id de la oferta del asset que nos interesa. Aqui vamos a utilizar en la negociacion el asset `asset-1`, publicado desde el conector de QNA.
+Consulta rapida para comprobar si el asset ya aparece en cache del consumer:
+
+```bash
+CATALOG_HIT_COUNT="$(curl -s -X POST "$CATALOG_QUERY/api/catalog/v1alpha/catalog/query" \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: $API_KEY_CP" \
+  -d '{"@context":["https://w3id.org/edc/connector/management/v0.0.1"],"@type":"QuerySpec"}' \
+  | jq -r --arg ASSET_ID "$ASSET_ID" --arg ENDPOINT "${PROVIDER_DSP_URL}/api/dsp" '
+      [
+        .[]
+        | (
+            [ { service: ."dcat:service", dataset: ."dcat:dataset" } ]
+            +
+            (
+              (."dcat:catalog" // [])
+              | if type=="array" then . else [.] end
+              | map({ service: ."dcat:service", dataset: ."dcat:dataset" })
+            )
+          )[]
+        | select((.service."dcat:endpointURL" // "") == $ENDPOINT)
+        | (.dataset // [])
+        | if type=="array" then .[] else . end
+        | select(type=="object" and (."@id" // "") == $ASSET_ID)
+      ]
+      | length
+    ')"
+
+echo "CATALOG_HIT_COUNT=$CATALOG_HIT_COUNT"
+```
+
+Resultado esperado: `CATALOG_HIT_COUNT` mayor que `0`.
 
 ## Paso 2. Extraer el `policy id` del asset objetivo
 
-Se consulta el catálogo federado y se extrae el policyId del asset concreto que se quiere negociar `$ASSET_ID`, filtrando además por el conector origen (QNA).
+Se consulta el catalogo federado y se extrae el `policyId` del asset concreto que se quiere negociar (`$ASSET_ID`), filtrando ademas por el conector origen (QNA).
 
-La negociacion necesitará el `odrl:hasPolicy.@id` exacto del asset (`$ASSET_ID`, por defecto `asset-1`). 
+La negociacion necesitara el `odrl:hasPolicy.@id` exacto del asset (`$ASSET_ID`, por defecto `asset-membership-demo-1`).
 
 ```bash
 POLICY_ID_ASSET="$(curl -s -X POST "$CATALOG_QUERY/api/catalog/v1alpha/catalog/query" \
@@ -131,8 +184,9 @@ Validacion rapida:
 ```bash
 if [ -z "$POLICY_ID_ASSET" ]; then
   echo "ERROR: no se encontro odrl:hasPolicy.@id para $ASSET_ID"
-  echo "Tip: repite Paso 1 para refrescar catalogo y revisa que seed-compose.sh haya terminado bien"
-  echo "Tip: verifica que el asset exista en provider QnA (assets/request)"
+  echo "Tip: repite Paso 1 para refrescar catalogo"
+  echo "Tip: verifica Paso 0 (asset en provider QnA)"
+  echo "Tip: si vienes de README_DSP_ADVANCED, confirma que ASSET_ID sea el mismo"
 fi
 ```
 
@@ -326,6 +380,8 @@ fi
 
 Caso: `POLICY_ID_ASSET` vacio.
 - Repite Paso 1.
+- Verifica Paso 0 para confirmar que el asset exista en QnA.
+- Si creaste el asset en `README_DSP_ADVANCED.md`, reutiliza exactamente ese `ASSET_ID`.
 - Verifica seed: `./deployment/compose/seed-compose.sh`.
 
 Caso: negociacion no llega a `FINALIZED`.
